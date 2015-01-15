@@ -1,0 +1,27 @@
+#!/bin/bash
+
+INSTALL_FILES=("br-docker-ctl" "ovs-docker-ctl")
+
+__say() {
+  local _msg=$1
+
+  echo $_msg
+}
+
+link() {
+  local _file=$1
+  rm /usr/bin/$_file -rf
+  ln -s $PWD/$_file /usr/bin/$_file
+}
+
+install() {
+  local _file
+
+  for _file in ${INSTALL_FILES[@]}
+  do
+    __say "Install $_file"
+    link $_file
+  done
+}
+
+install
