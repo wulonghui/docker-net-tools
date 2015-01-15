@@ -1,0 +1,37 @@
+#!/bin/bash
+
+__say() {
+  local _msg=$1
+
+  echo "$_msg"
+}
+
+clean_up_linux_br() {
+  local _linux_brs=($(brctl show | awk  '{print $1}' | sed '1d'))
+  local _linux_br
+
+  for _linux_br in ${_linux_brs[@]}
+  do
+    __say "brctl delbr $_linux_br"  
+    ip link set dev $_linux_br down
+    brctl delbr $_linux_br
+  done
+}
+
+clean_up_ovs() {
+  local _ovs_brs=($(ovs-vsctl list-br))
+  local _ovs_br
+
+  for _ovs_br in ${_ovs_brs[@]}
+  do
+    __say "ovs-vsctl del-br $_ovs_br"
+    ovs-vsctl del-br $_ovs_br
+  done 
+}
+
+clean_up() {
+  clean_up_ovs 
+  clean_up_linux_br
+}
+
+clean_up
