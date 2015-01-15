@@ -1,6 +1,7 @@
 #!/bin/bash
 
 INSTALL_FILES=("br-docker-ctl" "ovs-docker-ctl")
+PWD=$(cd `dirname $0`; pwd)
 
 __say() {
   local _msg=$1
