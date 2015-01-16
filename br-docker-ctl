@@ -148,3 +148,4 @@ case $1 in
         echo >&2 "$UTIL: unknown command \"$1\" (use --help for help)"
         exit 1
         ;;
+esac
