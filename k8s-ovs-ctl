@@ -1,0 +1,196 @@
+#!/bin/bash
+
+set -e
+
+function check_command_avail () {
+    while [ $# -ne 0 ]; do
+        if ("$1" --version) > /dev/null 2>&1; then :; else
+            echo >&2 "$UTIL: missing $1, cannot proceed"
+            exit 1
+        fi
+        shift
+    done
+}
+
+function init() {
+   DOCKER_BRIDGE=cbr0
+   OVS_SWITCH=obr0
+   DOCKER_OVS_TUN=tun0
+   TUNNEL_BASE=gre
+   NETWORK_CONF_PATH=/etc/sysconfig/network-scripts/
+}
+
+function add-docker-br() {
+    echo "Add docker bridge ${DOCKER_BRIDGE}"
+
+    ip link set dev ${DOCKER_BRIDGE} down || true
+    brctl delbr ${DOCKER_BRIDGE} 2>>/dev/null || true
+    
+    brctl addbr ${DOCKER_BRIDGE}
+    ip link set dev ${DOCKER_BRIDGE} up
+    ifconfig ${DOCKER_BRIDGE} ${CONTAINER_ADDR} netmask ${CONTAINER_NETMASK} up
+
+    # add ip route rules such that all pod traffic flows through docker bridge and consequently to the gre tunnels
+    echo "Add ip route rules such that all pod traffic flows through docker bridge"
+    ip route add ${CONTAINER_SUBNET} dev ${DOCKER_BRIDGE} scope link src ${CONTAINER_ADDR}
+}
+
+function del-docker-br() {
+    echo "Delete docker bridge ${DOCKER_BRIDGE}"
+
+    ip link set dev ${DOCKER_BRIDGE} down 
+    brctl delbr ${DOCKER_BRIDGE} 
+}
+
+function add-ovs-br () {
+    echo "Add ovs bridge ${OVS_SWITCH}"
+    ovs-vsctl del-br ${OVS_SWITCH} || true
+    ovs-vsctl add-br ${OVS_SWITCH} -- set Bridge ${OVS_SWITCH} fail-mode=secure
+    ovs-vsctl set bridge ${OVS_SWITCH} protocols=OpenFlow13
+    ovs-vsctl del-port ${OVS_SWITCH} ${TUNNEL_BASE}0 2>> /dev/null || true  
+    ovs-vsctl add-port ${OVS_SWITCH} ${TUNNEL_BASE}0 -- set Interface ${TUNNEL_BASE}0 type=${TUNNEL_BASE} options:remote_ip="flow" options:key="flow" ofport_request=10
+
+    echo "Add tun device"
+    ovs-vsctl del-port ${OVS_SWITCH} ${DOCKER_OVS_TUN} 2>> /dev/null || true
+    ovs-vsctl add-port ${OVS_SWITCH} ${DOCKER_OVS_TUN} -- set Interface ${DOCKER_OVS_TUN} type=internal ofport_request=9
+    brctl addif ${DOCKER_BRIDGE} ${DOCKER_OVS_TUN}
+    ip link set ${DOCKER_OVS_TUN} up
+}
+
+function del-ovs-br () {
+    echo "Delete ovs bridge ${OVS_SWITCH}"
+    ovs-vsctl del-br ${OVS_SWITCH}
+}
+
+function set-ovs-br () {
+    echo "Set ovs bridge ${OVS_SWITCH}"
+
+    # add oflow rules, because we do not want to use stp
+    echo "Add oflow rules"
+    ovs-ofctl -O OpenFlow13 del-flows ${OVS_SWITCH}
+
+
+    # now loop through all other minions and create persistent gre tunnels
+    echo "Creating persistent gre tunnels"
+    NODE_INDEX=0
+    for remote_ip in "${NODE_IPS[@]}"
+    do
+
+        if [ "${remote_ip}" == "${LOCAL_IP}" ]; then
+             ovs-ofctl -O OpenFlow13 add-flow ${OVS_SWITCH} "table=0,ip,in_port=10,nw_dst=${CONTAINER_SUBNETS[${NODE_INDEX}]},actions=output:9"
+             ovs-ofctl -O OpenFlow13 add-flow ${OVS_SWITCH} "table=0,arp,in_port=10,nw_dst=${CONTAINER_SUBNETS[${NODE_INDEX}]},actions=output:9"
+        else
+             ovs-ofctl -O OpenFlow13 add-flow ${OVS_SWITCH} "table=0,in_port=9,ip,nw_dst=${CONTAINER_SUBNETS[${NODE_INDEX}]},actions=set_field:${remote_ip}->tun_dst,output:10"
+             ovs-ofctl -O OpenFlow13 add-flow ${OVS_SWITCH} "table=0,in_port=9,arp,nw_dst=${CONTAINER_SUBNETS[${NODE_INDEX}]},actions=set_field:${remote_ip}->tun_dst,output:10"
+        fi
+        ((NODE_INDEX++)) || true
+    done
+    echo "Created persistent gre tunnels"
+}
+
+function setup() {
+    add-docker-br
+    add-ovs-br
+    set-ovs-br
+}
+
+function teardown() {
+    del-docker-br
+    del-ovs-br
+}
+
+function usage() {
+    cat << EOF
+${UTIL}: Performs integration of OpenVSwitch with Kubernetes.
+usage ${UTIL} COMMAND
+
+configure ${ENV_FILE}:
+  DOCKER_BRIDGE: The Name of Docker Brigde
+  CONTAINER_ADDR: The IP of Docker Brigde
+  CONTAINER_NETMASK: The NetMask of Docker Brigde
+  CONTAINER_SUBNET: The Subnet of Container Network
+  
+  OVS_SWITCH: The name of OVS Brigde
+  TUNNEL_BASE: The tunnel protocal
+  DOCKER_OVS_TUN: The name of tun to link Docker Brigde and OVS Brigde 
+  
+  LOCAL_IP: Current Node's IP
+  NODE_IPS: ALL Nodes' IP
+  CONTAINER_SUBNETS： ALL Nodes' container Subnets
+
+Commands:
+  add-docker-br 
+  del-docker-br 
+  
+  add-ovs-br
+  del-ovs-br 
+  set-ovs-br 
+
+  setup
+  teardown
+  
+Options:
+  -h, --help        display this help message.
+EOF
+}
+
+UTIL=$(basename $0)
+check_command_avail brctl docker ovs-vsctl ovs-ofctl
+
+ENV_FILE=~/k8s-ovs.env
+if [ ! -f $ENV_FILE ]; then
+    echo "$ENV_FILE not found"
+    exit 1
+fi
+source $ENV_FILE
+
+if [ $# -eq 0 ]; then
+    usage
+    exit 0
+fi
+
+case $1 in
+    "add-docker-br")
+        shift
+        add-docker-br "$@"
+        exit 0
+        ;;
+    "del-docker-br")
+        shift
+        del-docker-br "$@"
+        exit 0
+        ;;
+    "add-ovs-br")
+        shift
+        add-ovs-br "$@"
+        exit 0
+        ;;
+    "del-ovs-br")
+        shift
+        del-ovs-br "$@"
+        exit 0
+        ;;
+    "set-ovs-br")
+        shift
+        set-ovs-br "$@"
+        exit 0
+        ;;
+    "setup")
+        shift
+        setup "$@"
+        exit 0
+        ;;
+    "teardown")
+        shift
+        teardown "$@"
+        exit 0
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo >&2 "$UTIL: unknown command \"$1\" (use --help for help)"
+        exit 1
+        ;;
+esac
